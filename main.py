@@ -88,4 +88,3 @@ for _ in range(100):
 test_env.close()
 print(f"  Average score : {np.mean(test_scores):.1f}")
 print(f"  Best score    : {np.max(test_scores):.1f}")
-print(f"  Solved (≥475) : {'Yes ✓' if np.mean(test_scores) >= 475 else 'Not yet — try more episodes'}")
