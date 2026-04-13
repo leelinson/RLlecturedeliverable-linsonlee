@@ -1,99 +1,91 @@
 import gymnasium as gym
 import numpy as np
 
-# ─── Hyperparameters (matching lecture notation) ───────────────────────────────
-EPISODES      = 10_000
-ALPHA         = 0.1      # learning rate
-GAMMA         = 0.99     # discount factor
-EPSILON       = 1.0      # starting exploration rate (ε-greedy)
-EPSILON_DECAY = 0.995
-EPSILON_MIN   = 0.01
-BINS          = 20       # discretization buckets per state dimension
+num_episodes      = 10_000  # how many games to play during training
+learning_rate     = 0.1     # how fast the agent updates what it learns (alpha)
+discount          = 0.99    # how much the agent cares about future rewards (gamma)
+exploration_rate  = 1.0     # how often the agent tries random actions (epsilon)
+exploration_decay = 0.995   # how quickly the agent stops exploring over time
+min_exploration   = 0.01    # always keep a tiny bit of exploration
+num_buckets       = 20      # how finely we divide up each observation into slots
 
-# ─── Discretization ────────────────────────────────────────────────────────────
-# CartPole gives continuous states, but tabular Q-learning needs discrete states.
-# We clip each observation to a known range and bin it into BINS buckets.
-# State: [cart_pos, cart_vel, pole_angle, pole_ang_vel]
-OBS_LOW  = np.array([-2.4, -4.0, -0.2095, -4.0])
-OBS_HIGH = np.array([ 2.4,  4.0,  0.2095,  4.0])
+obs_min = np.array([-2.4, -4.0, -0.2095, -4.0])
+obs_max = np.array([ 2.4,  4.0,  0.2095,  4.0])
 
-def discretize(obs):
-    """Map continuous observation s_t into a discrete tuple (index into Q-table)."""
-    obs_clipped = np.clip(obs, OBS_LOW, OBS_HIGH)
-    ratios      = (obs_clipped - OBS_LOW) / (OBS_HIGH - OBS_LOW)  # normalize to [0, 1]
-    indices     = (ratios * BINS).astype(int)
-    return tuple(np.clip(indices, 0, BINS - 1))
+def get_discrete_state(observation):
+    clipped     = np.clip(observation, obs_min, obs_max)
+    normalized  = (clipped - obs_min) / (obs_max - obs_min)  
+    bucket_ids  = (normalized * num_buckets).astype(int)
+    return tuple(np.clip(bucket_ids, 0, num_buckets - 1))
 
-# ─── Q-Table: Q(s, a) for all s ∈ S, a ∈ A ────────────────────────────────────
-# Initialize Q(s, a) = 0 for all s, a  (Algorithm 1, line 1)
-q_table = np.zeros([BINS] * 4 + [2])
+# A big lookup table: for every possible state, store how good each action is.
+# Starts at zero — the agent knows nothing and learns from scratch.
+# Shape: (20, 20, 20, 20, 2) — 20 buckets per observation, 2 possible actions
+q_table = np.zeros([num_buckets] * 4 + [2])
 
-# ─── Algorithm 1: Tabular Q-Learning (from lecture notes) ─────────────────────
-env     = gym.make("CartPole-v1")
-epsilon = EPSILON
-episode_rewards = []
+env            = gym.make("CartPole-v1")
+rewards_per_episode = []
 
-for episode in range(EPISODES):                          # for each episode (line 2)
-    obs, _       = env.reset()
-    s_t          = discretize(obs)                       # initialize state s_0 (line 3)
-    total_reward = 0
-    done         = False
+for episode in range(num_episodes):
+    raw_observation, _ = env.reset()
+    current_state      = get_discrete_state(raw_observation)
+    total_reward       = 0
+    game_over          = False
 
-    while not done:                                      # for each step t (line 4)
-
-        # ε-greedy action selection (line 5)
-        # with prob ε → random action (explore)
-        # with prob 1-ε → argmax_a Q(s_t, a) (exploit)
-        if np.random.random() < epsilon:
-            a_t = env.action_space.sample()
+    while not game_over:
+        # Decide whether to explore (random) or exploit (use what we've learned)
+        if np.random.random() < exploration_rate:
+            action = env.action_space.sample()           
         else:
-            a_t = np.argmax(q_table[s_t])
+            action = np.argmax(q_table[current_state])   
 
-        # Take action a_t, observe r_t and s_{t+1} (line 6)
-        next_obs, r_t, terminated, truncated, _ = env.step(a_t)
-        done      = terminated or truncated
-        s_t_next  = discretize(next_obs)
+        # Take the action and see what happens
+        new_observation, reward, terminated, truncated, _ = env.step(action)
+        game_over  = terminated or truncated
+        next_state = get_discrete_state(new_observation)
 
-        # Q-learning update rule (line 7):
-        # Q(s_t, a_t) ← Q(s_t, a_t) + α [ r_t + γ * max_a' Q(s_{t+1}, a') - Q(s_t, a_t) ]
-        #                                  |_________TD target_________|   |__current estimate__|
-        td_target = r_t + GAMMA * np.max(q_table[s_t_next]) * (not done)
-        td_error  = td_target - q_table[s_t][a_t]
-        q_table[s_t][a_t] += ALPHA * td_error
+        # Update the Q-table using what we just experienced:
+        # "What I thought this action was worth" vs "What it actually led to"
+        best_future_value  = np.max(q_table[next_state])
+        current_value      = q_table[current_state][action]
+        what_it_was_worth  = reward + discount * best_future_value * (not game_over)
 
-        s_t = s_t_next                                   # s_t ← s_{t+1} (line 8)
-        total_reward += r_t
+        q_table[current_state][action] += learning_rate * (what_it_was_worth - current_value)
 
-    # Decay ε after each episode (explore early, exploit later)
-    epsilon = max(EPSILON_MIN, epsilon * EPSILON_DECAY)
-    episode_rewards.append(total_reward)
+        current_state = next_state
+        total_reward += reward
+
+    # Reduce exploration over time — trust what we've learned more and more
+    exploration_rate = max(min_exploration, exploration_rate * exploration_decay)
+    rewards_per_episode.append(total_reward)
 
     if (episode + 1) % 1000 == 0:
-        avg = np.mean(episode_rewards[-1000:])
-        print(f"Episode {episode+1:>6} | Avg reward (last 1000): {avg:.1f} | ε: {epsilon:.3f}")
+        recent_avg = np.mean(rewards_per_episode[-1000:])
+        print(f"Episode {episode+1:>6} | Avg score (last 1000): {recent_avg:.1f} | Exploration: {exploration_rate:.3f}")
 
 env.close()
 
-# ─── Evaluation: greedy policy, no exploration ─────────────────────────────────
-print("\nEvaluating learned policy (greedy, ε=0) over 100 episodes...")
-eval_env     = gym.make("CartPole-v1")
-eval_rewards = []
+# Now test the learned policy with no exploration — pure exploitation
+print("\nTesting the learned policy over 100 games...")
+test_env     = gym.make("CartPole-v1")
+test_scores  = []
 
 for _ in range(100):
-    obs, _ = eval_env.reset()
-    s_t    = discretize(obs)
-    total  = 0
-    done   = False
-    while not done:
-        a_t                    = np.argmax(q_table[s_t])   # always exploit
-        obs, r, term, trunc, _ = eval_env.step(a_t)
-        done  = term or trunc
-        s_t   = discretize(obs)
-        total += r
-    eval_rewards.append(total)
+    raw_observation, _ = test_env.reset()
+    current_state      = get_discrete_state(raw_observation)
+    score = 0
+    game_over = False
 
-eval_env.close()
+    while not game_over:
+        action                             = np.argmax(q_table[current_state])
+        raw_observation, reward, terminated, truncated, _ = test_env.step(action)
+        game_over     = terminated or truncated
+        current_state = get_discrete_state(raw_observation)
+        score        += reward
 
-print(f"  Mean reward : {np.mean(eval_rewards):.1f}")
-print(f"  Max reward  : {np.max(eval_rewards):.1f}")
-print(f"  Solved (≥475): {'Yes ✓' if np.mean(eval_rewards) >= 475 else 'Not yet — try more episodes'}")
+    test_scores.append(score)
+
+test_env.close()
+print(f"  Average score : {np.mean(test_scores):.1f}")
+print(f"  Best score    : {np.max(test_scores):.1f}")
+print(f"  Solved (≥475) : {'Yes ✓' if np.mean(test_scores) >= 475 else 'Not yet — try more episodes'}")
